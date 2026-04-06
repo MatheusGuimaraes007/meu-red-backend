@@ -1,0 +1,108 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id           String   @id @default(uuid())
+  fullName     String   @map("full_name")
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  avatarUrl    String?  @map("avatar_url")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  profile          UserProfile?
+  sessions         Session[]
+  checkIns         CheckIn[]
+  engagementEvents EngagementEvent[]
+  refreshTokens    RefreshToken[]
+
+  @@map("users")
+}
+
+model UserProfile {
+  id             String   @id @default(uuid())
+  userId         String   @unique @map("user_id")
+  activity       String?
+  sleep          String?
+  pain           String?
+  goal           String?
+  onboardingDone Boolean  @default(false) @map("onboarding_done")
+  selectedPanel  String   @default("red-600") @map("selected_panel")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_profiles")
+}
+
+model Session {
+  id                    String   @id @default(uuid())
+  userId                String   @map("user_id")
+  protocolId            String?  @map("protocol_id")
+  protocolName          String?  @map("protocol_name")
+  category              String?
+  durationSeconds       Int      @map("duration_seconds")
+  targetDurationSeconds Int      @map("target_duration_seconds")
+  completed             Boolean  @default(false)
+  sessionDate           DateTime @map("session_date") @db.Date
+  createdAt             DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, sessionDate(sort: Desc)])
+  @@index([sessionDate(sort: Desc)])
+  @@map("sessions")
+}
+
+model CheckIn {
+  id          String   @id @default(uuid())
+  userId      String   @map("user_id")
+  pain        Int      @db.SmallInt
+  energy      Int      @db.SmallInt
+  sleep       Int      @db.SmallInt
+  recovery    Int      @db.SmallInt
+  checkInDate DateTime @map("check_in_date") @db.Date
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, checkInDate])
+  @@index([userId, checkInDate(sort: Desc)])
+  @@map("check_ins")
+}
+
+model EngagementEvent {
+  id             String   @id @default(uuid())
+  userId         String   @map("user_id")
+  eventType      String   @map("event_type")
+  feedbackReason String?  @map("feedback_reason")
+  sessionCount   Int?     @map("session_count")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("engagement_events")
+}
+
+model RefreshToken {
+  id         String   @id @default(uuid())
+  userId     String   @map("user_id")
+  tokenHash  String   @map("token_hash")
+  deviceInfo String?  @map("device_info")
+  expiresAt  DateTime @map("expires_at")
+  revoked    Boolean  @default(false)
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([tokenHash])
+  @@map("refresh_tokens")
+}

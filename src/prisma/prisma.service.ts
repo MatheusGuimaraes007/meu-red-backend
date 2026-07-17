@@ -32,6 +32,14 @@ export class PrismaService
   }
 
   private async ensureIntegrationSchema() {
+    const requiredTables = await this.$queryRaw<Array<{ name: string }>>`
+      select name
+      from unnest(array['whatsapp_config', 'crm_funnels', 'crm_stages', 'contacts']) as required(name)
+      where to_regclass('public.' || required.name) is not null
+    `;
+
+    if (requiredTables.length < 4) return;
+
     const statements = [
       `create table if not exists public.crm_integrations (
         id uuid primary key default gen_random_uuid(),

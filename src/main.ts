@@ -1,38 +1,30 @@
 import { NestFactory } from '@nestjs/core';
-import { ValidationPipe } from '@nestjs/common';
-import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { AppModule } from './app.module';
+import helmet from 'helmet';
+import { ValidationPipe } from '@nestjs/common';
+import { BigIntInterceptor } from './common/bigint.interceptor';
+import { SocketIoAdapter } from './realtime/socket-io.adapter';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
-
+  app.use(helmet());
+  const defaultCorsOrigins = [
+    'http://localhost:5173',
+    'https://crm-red-front.vercel.app',
+  ];
+  const corsOrigins = [
+    ...defaultCorsOrigins,
+    ...(process.env.CORS_ORIGINS || '')
+      .split(',')
+      .map((origin) => origin.trim())
+      .filter(Boolean),
+  ].filter((origin, index, all) => all.indexOf(origin) === index);
+  app.enableCors({ origin: corsOrigins, credentials: true });
+  app.useWebSocketAdapter(new SocketIoAdapter(app, corsOrigins));
   app.setGlobalPrefix('api');
-
-  app.enableCors({
-    origin: true,
-    credentials: true,
-  });
-
-  app.useGlobalPipes(
-    new ValidationPipe({
-      whitelist: true,
-      forbidNonWhitelisted: true,
-      transform: true,
-    }),
-  );
-
-  const config = new DocumentBuilder()
-    .setTitle('Meu RED API')
-    .setDescription('API do aplicativo Meu RED — terapia com luz vermelha')
-    .setVersion('1.0')
-    .addBearerAuth()
-    .build();
-  const document = SwaggerModule.createDocument(app, config);
-  SwaggerModule.setup('api/docs', app, document);
-
-  const port = process.env.PORT ?? 3333;
-  await app.listen(port);
-  console.log(`🚀 API rodando em http://localhost:${port}/api`);
-  console.log(`📄 Swagger em http://localhost:${port}/api/docs`);
+  app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
+  app.useGlobalInterceptors(new BigIntInterceptor());
+  app.enableShutdownHooks();
+  await app.listen(process.env.PORT ?? 3000, '0.0.0.0');
 }
-bootstrap();
+void bootstrap();

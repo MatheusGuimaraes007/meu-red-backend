@@ -2,20 +2,24 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { PrismaModule } from './prisma/prisma.module';
 import { AuthModule } from './auth/auth.module';
-import { ProfileModule } from './profile/profile.module';
-import { SessionsModule } from './sessions/sessions.module';
-import { CheckInsModule } from './check-ins/check-ins.module';
-import { EngagementModule } from './engagement/engagement.module';
+import { CrmModule } from './crm/crm.module';
+import { WhatsappModule } from './whatsapp/whatsapp.module';
+import { RealtimeModule } from './realtime/realtime.module';
+import { HealthModule } from './health/health.module';
+import { MediaModule } from './media/media.module';
+import { IntegrationsModule } from './integrations/integrations.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
     PrismaModule,
     AuthModule,
-    ProfileModule,
-    SessionsModule,
-    CheckInsModule,
-    EngagementModule,
+    CrmModule,
+    WhatsappModule,
+    RealtimeModule,
+    HealthModule,
+    MediaModule,
+    IntegrationsModule,
   ],
 })
-export class AppModule { }
+export class AppModule {}

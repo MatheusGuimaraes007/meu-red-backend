@@ -1,64 +1,53 @@
-import {
-  Controller,
-  Post,
-  Get,
-  Body,
-  UseGuards,
-  HttpCode,
-  HttpStatus,
-} from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
+import { Body, Controller, Get, Post, Req, UseGuards } from '@nestjs/common';
+import { IsEmail, IsString, MinLength } from 'class-validator';
+import type { Request } from 'express';
 import { AuthService } from './auth.service';
-import { RegisterDto, LoginDto, RefreshTokenDto } from './dto/auth.dto';
-import { JwtGuard } from './jwt.guard';
-import { GetUser } from './get-user.decorator';
+import { JwtAuthGuard } from './jwt.guard';
 
-@ApiTags('Auth')
+class LoginDto {
+  @IsEmail() email!: string;
+  @IsString() @MinLength(8) password!: string;
+}
+
+class RefreshDto {
+  @IsString() @MinLength(32) refreshToken!: string;
+}
+
 @Controller('auth')
 export class AuthController {
-  constructor(private authService: AuthService) { }
-
-  @Post('register')
-  @ApiOperation({ summary: 'Criar nova conta' })
-  @ApiResponse({ status: 201, description: 'Usuário criado com sucesso' })
-  @ApiResponse({ status: 409, description: 'E-mail já cadastrado' })
-  register(@Body() dto: RegisterDto) {
-    return this.authService.register(dto);
-  }
+  constructor(private readonly auth: AuthService) {}
 
   @Post('login')
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Login com e-mail e senha' })
-  @ApiResponse({ status: 200, description: 'Tokens retornados' })
-  @ApiResponse({ status: 401, description: 'Credenciais inválidas' })
-  login(@Body() dto: LoginDto) {
-    return this.authService.login(dto);
+  login(@Body() body: LoginDto, @Req() request: Request) {
+    return this.auth.login(body.email, body.password, this.context(request));
   }
 
   @Post('refresh')
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Renovar access token' })
-  @ApiResponse({ status: 200, description: 'Novos tokens retornados' })
-  refresh(@Body() dto: RefreshTokenDto) {
-    return this.authService.refresh(dto.refreshToken);
+  refresh(@Body() body: RefreshDto, @Req() request: Request) {
+    return this.auth.refresh(body.refreshToken, this.context(request));
   }
 
   @Post('logout')
-  @HttpCode(HttpStatus.OK)
-  @UseGuards(JwtGuard)
-  @ApiBearerAuth()
-  @ApiOperation({ summary: 'Logout (invalidar refresh token)' })
-  @ApiResponse({ status: 200, description: 'Logout realizado' })
-  logout(@Body() dto: RefreshTokenDto) {
-    return this.authService.logout(dto.refreshToken);
+  logout(@Body() body: RefreshDto) {
+    return this.auth.logout(body.refreshToken);
   }
 
+  @UseGuards(JwtAuthGuard)
+  @Post('logout-all')
+  logoutAll(@Req() request: Request & { user: { sub: string } }) {
+    return this.auth.logoutAll(request.user.sub);
+  }
+
+  @UseGuards(JwtAuthGuard)
   @Get('me')
-  @UseGuards(JwtGuard)
-  @ApiBearerAuth()
-  @ApiOperation({ summary: 'Dados do usuário logado' })
-  @ApiResponse({ status: 200, description: 'Perfil do usuário' })
-  getMe(@GetUser('id') userId: string) {
-    return this.authService.getMe(userId);
+  me(@Req() request: Request & { user: { sub: string } }) {
+    return this.auth.me(request.user.sub);
+  }
+
+  private context(request: Request) {
+    return {
+      userAgent: request.get('user-agent')?.slice(0, 500),
+      ipAddress: request.ip,
+    };
   }
 }

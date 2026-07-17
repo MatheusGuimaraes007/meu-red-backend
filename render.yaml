@@ -1,20 +1,49 @@
 services:
   - type: web
-    name: meu-red-backend
+    name: crm-red-backend
     runtime: node
-    plan: free
-    buildCommand: npm install --include=dev && npx prisma generate && npm run build
+    buildCommand: npm ci && npm run build
     startCommand: npm run start:prod
+    healthCheckPath: /api/health
+    autoDeployTrigger: commit
     envVars:
-      - key: NODE_ENV
-        value: production
+      - key: NODE_VERSION
+        value: 22.17.0
       - key: DATABASE_URL
         sync: false
+      - key: SUPABASE_POOLER_HOST
+        value: aws-1-us-east-1.pooler.supabase.com
       - key: DIRECT_URL
         sync: false
       - key: JWT_SECRET
         sync: false
       - key: JWT_EXPIRES_IN
-        value: "15m"
-      - key: JWT_REFRESH_EXPIRES_IN
-        value: "7d"
+        value: 8h
+      - key: REFRESH_TOKEN_EXPIRES_IN_DAYS
+        value: 30
+      - key: CORS_ORIGINS
+        value: https://crm-red-front.vercel.app
+      - key: MASTER_ADMIN_EMAIL
+        sync: false
+      - key: MASTER_ADMIN_PASSWORD
+        sync: false
+      - key: W_API_BASE_URL
+        value: https://api.w-api.app
+      - key: W_API_API_KEY
+        sync: false
+      - key: W_API_WEBHOOK_BASE_URL
+        sync: false
+      - key: WHATSAPP_WEBHOOK_SECRET
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_STORAGE_BUCKET_CHAT_MEDIA
+        value: chat-media
+      - key: MEDIA_SIGNED_URL_TTL_SECONDS
+        value: 3600
+      - key: MEDIA_MAX_FILE_SIZE_BYTES
+        value: 52428800
+      - key: MEDIA_DOWNLOAD_TIMEOUT_MS
+        value: 30000

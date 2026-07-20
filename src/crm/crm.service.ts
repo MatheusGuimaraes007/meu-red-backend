@@ -140,6 +140,105 @@ export class CrmService {
     return updated;
   }
 
+  async importContacts(
+    data: Record<string, unknown>,
+    user?: { sub: string; role: string },
+  ) {
+    const instanceId = this.string(data.instance_id);
+    const funnelId = this.string(data.funnel_id);
+    const stageId = this.string(data.stage_id);
+    const rawLeads = Array.isArray(data.leads) ? data.leads : [];
+
+    if (!instanceId) throw new BadRequestException('Selecione uma instância');
+    if (!funnelId) throw new BadRequestException('Selecione um funil');
+    if (!stageId) throw new BadRequestException('Selecione uma etapa');
+    if (!rawLeads.length) throw new BadRequestException('Informe pelo menos um lead');
+    if (rawLeads.length > 1000)
+      throw new BadRequestException('Importe no máximo 1000 leads por vez');
+
+    const [instance, funnel, stage] = await Promise.all([
+      this.ensureInstanceAccess(instanceId, user),
+      this.ensureFunnelAccess(funnelId, user),
+      this.ensureStageAccess(stageId, user),
+    ]);
+    if (funnel.whatsapp_config_id !== instance.id)
+      throw new BadRequestException('O funil não pertence à instância selecionada');
+    if (stage.funnel_id !== funnel.id)
+      throw new BadRequestException('A etapa não pertence ao funil selecionado');
+
+    const invalid: Array<{ row: number; error: string }> = [];
+    const unique = new Map<string, { name: string; phone: string; row: number }>();
+    rawLeads.forEach((value, index) => {
+      const lead = this.object(value);
+      const name = this.string(lead.name ?? lead.nome);
+      const phone = this.onlyDigits(lead.phone_number ?? lead.telefone ?? lead.phone);
+      if (!name) {
+        invalid.push({ row: index + 1, error: 'Nome obrigatório' });
+        return;
+      }
+      if (!phone || phone.length < 10 || phone.length > 15) {
+        invalid.push({ row: index + 1, error: 'Telefone inválido; use DDI + DDD + número' });
+        return;
+      }
+      unique.set(phone, { name, phone, row: index + 1 });
+    });
+    if (!unique.size)
+      throw new BadRequestException({ message: 'Nenhum lead válido encontrado', errors: invalid });
+
+    const leads = [...unique.values()];
+    const existing = await this.prisma.contacts.findMany({
+      where: { whatsapp_config_id: instance.id, phone_number: { in: leads.map(item => item.phone) } },
+    });
+    const existingByPhone = new Map(existing.map(item => [item.phone_number, item]));
+    const importedAt = new Date().toISOString();
+    const operations = leads.map(lead => {
+      const current = existingByPhone.get(lead.phone);
+      return this.prisma.contacts.upsert({
+        where: {
+          whatsapp_config_id_phone_number: {
+            whatsapp_config_id: instance.id,
+            phone_number: lead.phone,
+          },
+        },
+        create: {
+          whatsapp_config_id: instance.id,
+          phone_number: lead.phone,
+          name: lead.name,
+          crm_funnel_id: funnel.id,
+          crm_stage_id: stage.id,
+          metadata: {
+            lead_source: 'manual_import',
+            imported_at: importedAt,
+            name_source: 'manual',
+          },
+        },
+        update: {
+          name: lead.name,
+          crm_funnel_id: funnel.id,
+          crm_stage_id: stage.id,
+          metadata: this.mergeMetadata(current?.metadata, {
+            lead_source: 'manual_import',
+            imported_at: importedAt,
+            name_source: 'manual',
+          }),
+        },
+      });
+    });
+    const contacts = await this.prisma.$transaction(operations);
+    contacts.forEach(contact =>
+      this.emitContact(existingByPhone.has(contact.phone_number) ? 'contact:updated' : 'contact:created', contact),
+    );
+
+    return {
+      total: contacts.length,
+      created: contacts.filter(item => !existingByPhone.has(item.phone_number)).length,
+      updated: contacts.filter(item => existingByPhone.has(item.phone_number)).length,
+      skipped: rawLeads.length - contacts.length,
+      errors: invalid,
+      contact_ids: contacts.map(item => item.id),
+    };
+  }
+
   private contactForClient(contact: any) {
     const { crm_contact_tags, ...rest } = contact;
     return {

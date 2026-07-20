@@ -37,6 +37,12 @@ export class CrmController {
   ) {
     return this.crm.contact(id, request.user);
   }
+  @Post('contacts/import') importContacts(
+    @Req() request: Request & { user: { sub: string; role: string } },
+    @Body() body: Record<string, unknown>,
+  ) {
+    return this.crm.importContacts(body, request.user);
+  }
   @Patch('contacts/:id') update(
     @Req() request: Request & { user: { sub: string; role: string } },
     @Param('id') id: string,

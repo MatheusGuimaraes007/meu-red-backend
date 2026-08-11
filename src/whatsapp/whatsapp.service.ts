@@ -113,10 +113,13 @@ export class WhatsappService {
         : { id: { in: allowed.map((item) => item.whatsapp_config_id) } },
       orderBy: [{ connected_at: 'desc' }, { updated_at: 'desc' }],
     });
+    const visibleRows = rows.filter(
+      (row) => this.record(row.metadata).local_deleted !== true,
+    );
     return {
       ok: true,
-      instances: rows.map((row) => this.safe(row)),
-      total: rows.length,
+      instances: visibleRows.map((row) => this.safe(row)),
+      total: visibleRows.length,
       warning,
     };
   }
@@ -124,6 +127,15 @@ export class WhatsappService {
   async config(id: string) {
     const instance = await this.find(id);
     return { ok: true, instance: this.safe(instance) };
+  }
+
+  async credentials(id: string) {
+    const instance = await this.find(id);
+    return {
+      ok: true,
+      instanceId: instance.provider_instance_id,
+      token: instance.provider_token,
+    };
   }
 
   async updateInstance(id: string, dto: UpdateWhatsappInstanceDto) {
@@ -500,24 +512,49 @@ export class WhatsappService {
 
   async deleteInstance(id: string) {
     const instance = await this.find(id);
-    const url = new URL('/v1/client/delete-instance', this.baseUrl());
-    url.searchParams.set('instanceId', this.requiredInstanceId(instance));
-    await this.providerRequest(url.toString(), {
-      method: 'DELETE',
-      body: { apiKey: this.required('W_API_API_KEY') },
-    });
+    let providerDeleted = false;
+    let providerWarning: string | null = null;
+    try {
+      const url = new URL('/v1/client/delete-instance', this.baseUrl());
+      url.searchParams.set('instanceId', this.requiredInstanceId(instance));
+      await this.providerRequest(url.toString(), {
+        method: 'DELETE',
+        body: { apiKey: this.required('W_API_API_KEY') },
+      });
+      providerDeleted = true;
+    } catch (error) {
+      providerWarning =
+        error instanceof Error
+          ? error.message
+          : 'A W-API não confirmou a exclusão.';
+      this.logger.warn(
+        `Instância ${id} removida localmente sem confirmação da W-API: ${providerWarning}`,
+      );
+    }
+    const previousMetadata = this.record(instance.metadata);
     const updated = await this.prisma.whatsapp_config.update({
       where: { id },
       data: {
         is_active: false,
-        status: 'EXPIRED',
+        status: 'LOCAL_DELETED',
         disconnected_at: new Date(),
         updated_at: new Date(),
-        provider_token: null,
+        metadata: {
+          ...previousMetadata,
+          local_deleted: true,
+          local_deleted_at: new Date().toISOString(),
+          provider_deleted: providerDeleted,
+          provider_delete_warning: providerWarning,
+        },
       },
     });
     this.emitInstance(updated);
-    return { ok: true, instance: this.safe(updated) };
+    return {
+      ok: true,
+      removedLocally: true,
+      providerDeleted,
+      warning: providerWarning,
+    };
   }
 
   async webhook(body: unknown, secret?: string) {
@@ -607,6 +644,17 @@ export class WhatsappService {
     for (const item of instances) {
       const id = this.string(item.instanceId);
       if (!id) continue;
+      const existing = await this.prisma.whatsapp_config.findUnique({
+        where: {
+          provider_provider_instance_id: {
+            provider: 'w_api',
+            provider_instance_id: id,
+          },
+        },
+        select: { metadata: true },
+      });
+      if (existing && this.record(existing.metadata).local_deleted === true)
+        continue;
       await this.prisma.whatsapp_config.upsert({
         where: {
           provider_provider_instance_id: {

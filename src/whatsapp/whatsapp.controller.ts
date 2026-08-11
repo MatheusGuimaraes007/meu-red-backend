@@ -46,6 +46,13 @@ export class WhatsappController {
   }
 
   @UseGuards(JwtAuthGuard)
+  @Get('instances/:id/credentials')
+  credentials(@Req() request: AuthRequest, @Param('id') id: string) {
+    this.assertManager(request);
+    return this.whatsapp.credentials(id);
+  }
+
+  @UseGuards(JwtAuthGuard)
   @Patch('instances/:id')
   update(
     @Req() request: AuthRequest,

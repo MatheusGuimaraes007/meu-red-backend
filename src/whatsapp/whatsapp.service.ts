@@ -785,14 +785,27 @@ export class WhatsappService {
       : fromMe
         ? chatId
         : (this.string(sender.id) ?? chatId);
+    const aliases = [
+      phone,
+      chatId,
+      this.string(sender.id),
+      this.string(sender.phone),
+      this.string(sender.number),
+      this.string(sender.lid),
+    ].filter((value): value is string => Boolean(value));
     const existing = await this.prisma.contacts.findFirst({
       where: {
         whatsapp_config_id: instance.id,
         OR: [
-          { phone_number: phone },
-          { metadata: { path: ['chatId'], equals: chatId } },
+          { phone_number: { in: aliases } },
+          ...aliases.flatMap((alias) => [
+            { metadata: { path: ['chatId'], equals: alias } },
+            { metadata: { path: ['last_sender_id'], equals: alias } },
+            { metadata: { path: ['lid'], equals: alias } },
+          ]),
         ],
       },
+      orderBy: { last_interaction: 'desc' },
     });
     const isFirstIncomingMessage =
       !fromMe &&
@@ -848,6 +861,7 @@ export class WhatsappService {
       chatId,
       needs_reply: !fromMe,
       last_sender_id: this.string(sender.id),
+      lid: this.string(sender.lid) ?? (phone.endsWith('@lid') ? phone : null),
       last_sender_name: this.first(sender.pushName, sender.verifiedBizName),
       last_sender_picture: senderProfilePicture,
       profile_picture: isGroup

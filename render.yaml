@@ -32,7 +32,7 @@ services:
       - key: W_API_API_KEY
         sync: false
       - key: W_API_WEBHOOK_BASE_URL
-        sync: false
+        value: https://crm-red-backend.onrender.com
       - key: WHATSAPP_WEBHOOK_SECRET
         sync: false
       - key: SUPABASE_URL

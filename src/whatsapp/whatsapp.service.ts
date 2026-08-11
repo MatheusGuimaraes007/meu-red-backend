@@ -1136,7 +1136,17 @@ export class WhatsappService {
     return payload;
   }
   private webhookUrls() {
-    const base = this.required('W_API_WEBHOOK_BASE_URL').replace(/\/$/, '');
+    const base = (
+      this.optional('W_API_WEBHOOK_BASE_URL') ??
+      this.optional('RENDER_EXTERNAL_URL') ??
+      (this.optional('NODE_ENV') === 'production'
+        ? 'https://crm-red-backend.onrender.com'
+        : undefined)
+    )?.replace(/\/$/, '');
+    if (!base)
+      throw new BadRequestException(
+        'Configure W_API_WEBHOOK_BASE_URL com a URL pública HTTPS do backend',
+      );
     const secret = this.required('WHATSAPP_WEBHOOK_SECRET');
     const url = `${base}/api/whatsapp/webhook?secret=${encodeURIComponent(secret)}`;
     if (!url.startsWith('https://'))

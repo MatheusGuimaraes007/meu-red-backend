@@ -28,8 +28,20 @@ export class CrmController {
     @Query('search') search?: string,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
+    @Query('funnel_id') funnel?: string,
+    @Query('stage_id') stage?: string,
+    @Query('tag_id') tag?: string,
   ) {
-    return this.crm.contacts(request.user, instance, search, page, limit);
+    return this.crm.contacts(request.user, instance, search, page, limit, funnel, stage, tag);
+  }
+  @Get('funnels/:id/board-summary') boardSummary(
+    @Req() request: Request & { user: { sub: string; role: string } },
+    @Param('id') id: string,
+    @Query('instance_id') instance?: string,
+    @Query('search') search?: string,
+    @Query('tag_id') tag?: string,
+  ) {
+    return this.crm.boardSummary(id, instance, search, tag, request.user);
   }
   @Get('contacts/:id') contact(
     @Req() request: Request & { user: { sub: string; role: string } },

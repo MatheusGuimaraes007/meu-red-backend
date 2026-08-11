@@ -550,6 +550,7 @@ model contacts {
   @@unique([whatsapp_config_id, phone_number], map: "contacts_instance_phone_idx")
   @@index([crm_stage_id], map: "contacts_crm_stage_idx")
   @@index([whatsapp_config_id], map: "contacts_whatsapp_config_idx")
+  @@index([whatsapp_config_id, crm_funnel_id, crm_stage_id, last_interaction(sort: Desc)], map: "contacts_board_idx")
   @@schema("public")
 }
 

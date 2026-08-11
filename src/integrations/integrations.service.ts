@@ -109,7 +109,7 @@ export class IntegrationsService {
       });
       await this.prisma.crm_integration_deliveries.update({ where: { id: deliveryId }, data: { status: 'processed', contact_id: result.contact.id } });
       await this.prisma.crm_integrations.update({ where: { id: integration.id }, data: { last_used_at: new Date() } });
-      this.realtime.emit('contact:updated', result.contact as unknown as Record<string, unknown>, [this.realtime.instance(automation.whatsapp_config_id), this.realtime.contact(result.contact.id)]);
+      this.realtime.emit(result.action === 'created' ? 'contact:created' : 'contact:updated', result.contact as unknown as Record<string, unknown>, [this.realtime.instance(automation.whatsapp_config_id), this.realtime.contact(result.contact.id)]);
       return { ok: true, action: result.action, contactId: result.contact.id, requestId, destination: { instanceId: automation.whatsapp_config_id, funnelId: automation.funnel_id, stageId: automation.stage_id } };
     } catch (error) {
       if (deliveryId) await this.prisma.crm_integration_deliveries.update({ where: { id: deliveryId }, data: { status: 'failed', error: error instanceof Error ? error.message.slice(0, 500) : 'Falha ao processar lead' } }).catch(() => undefined);

@@ -26,6 +26,9 @@ export class CrmService {
     searchOrPage?: string,
     pageOrLimit?: string,
     limitValue?: string,
+    funnelValue?: string,
+    stageValue?: string,
+    tagValue?: string,
   ) {
     const hasUser =
       !!userOrInstance &&
@@ -38,10 +41,27 @@ export class CrmService {
     const search = hasUser ? searchOrPage : instanceOrSearch;
     const pageValue = hasUser ? pageOrLimit : searchOrPage;
     const finalLimitValue = hasUser ? limitValue : pageOrLimit;
+    const funnel = hasUser ? funnelValue : undefined;
+    const stage = hasUser ? stageValue : undefined;
+    const tag = hasUser ? tagValue : undefined;
     const { page, limit, skip } = this.pagination(pageValue, finalLimitValue);
+    if (instance) await this.ensureInstanceAccess(instance, user);
+    if (funnel) {
+      const authorizedFunnel = await this.ensureFunnelAccess(funnel, user);
+      if (instance && authorizedFunnel.whatsapp_config_id !== instance)
+        throw new BadRequestException('O funil não pertence à instância selecionada');
+    }
+    if (stage && stage !== 'none') {
+      const authorizedStage = await this.ensureStageAccess(stage, user);
+      if (funnel && authorizedStage.funnel_id !== funnel)
+        throw new BadRequestException('A etapa não pertence ao funil selecionado');
+    }
     const where: Prisma.contactsWhereInput = {
       ...(await this.contactAccessWhere(user)),
       ...(instance ? { whatsapp_config_id: instance } : {}),
+      ...(funnel ? { crm_funnel_id: funnel } : {}),
+      ...(stage ? { crm_stage_id: stage === 'none' ? null : stage } : {}),
+      ...(tag ? { crm_contact_tags: { some: { tag_id: tag } } } : {}),
       ...(search
         ? {
             OR: [
@@ -77,6 +97,36 @@ export class CrmService {
         })),
       ),
       pagination: this.pageMeta(page, limit, total),
+    };
+  }
+
+  async boardSummary(funnelId: string, instanceId?: string, search?: string, tagId?: string, user?: { sub: string; role: string }) {
+    if (!instanceId) throw new BadRequestException('instance_id é obrigatório');
+    await this.ensureInstanceAccess(instanceId, user);
+    const funnel = await this.ensureFunnelAccess(funnelId, user);
+    if (funnel.whatsapp_config_id !== instanceId) throw new BadRequestException('O funil não pertence à instância selecionada');
+    if (tagId) {
+      const tag = await this.ensureTagAccess(tagId, user);
+      if (tag.whatsapp_config_id !== instanceId) throw new BadRequestException('A etiqueta não pertence à instância selecionada');
+    }
+    const filtered: Prisma.contactsWhereInput = {
+      ...(await this.contactAccessWhere(user)), whatsapp_config_id: instanceId, crm_funnel_id: funnelId,
+      ...(tagId ? { crm_contact_tags: { some: { tag_id: tagId } } } : {}),
+      ...(search ? { OR: [{ name: { contains: search, mode: 'insensitive' } }, { phone_number: { contains: search } }] } : {}),
+    };
+    const [rawGroups, total, withoutStage, withoutFunnel] = await this.prisma.$transaction([
+      this.prisma.contacts.groupBy({ by: ['crm_stage_id'], where: filtered, orderBy: { crm_stage_id: 'asc' }, _count: { id: true } }),
+      this.prisma.contacts.count({ where: filtered }),
+      this.prisma.contacts.count({ where: { ...filtered, crm_stage_id: null } }),
+      this.prisma.contacts.count({ where: { ...(await this.contactAccessWhere(user)), whatsapp_config_id: instanceId, crm_funnel_id: null } }),
+    ]);
+    const groups = rawGroups as Array<{ crm_stage_id: string | null; _count: { id: number } }>;
+    return {
+      total,
+      stages: Object.fromEntries(groups.filter(item => item.crm_stage_id).map(item => [item.crm_stage_id!, item._count.id])),
+      withoutStage, withoutFunnel,
+      filters: { instance_id: instanceId, funnel_id: funnelId, search: search || null, tag_id: tagId || null },
+      generatedAt: new Date().toISOString(),
     };
   }
 
@@ -130,6 +180,12 @@ export class CrmService {
       update.crm_stages = data.crm_stage_id
         ? { connect: { id: String(data.crm_stage_id) } }
         : { disconnect: true };
+    if (data.crm_stage_id) {
+      const stage = await this.ensureStageAccess(String(data.crm_stage_id), user);
+      const targetFunnel = data.crm_funnel_id ? String(data.crm_funnel_id) : existing.crm_funnel_id;
+      if (!targetFunnel || stage.funnel_id !== targetFunnel)
+        throw new BadRequestException('A etapa não pertence ao funil selecionado');
+    }
     const contact = await this.prisma.contacts.update({
       where: { id },
       data: update,

@@ -92,3 +92,34 @@ describe('CrmService contact names', () => {
     });
   });
 });
+
+describe('CrmService board totals', () => {
+  it('returns all 402 contacts from database aggregates independently of card pagination', async () => {
+    const prisma = {
+      whatsapp_config: { findFirst: jest.fn().mockResolvedValue({ id: 'instance-1' }) },
+      crm_funnels: { findFirst: jest.fn().mockResolvedValue({ id: 'funnel-1', whatsapp_config_id: 'instance-1' }) },
+      contacts: {
+        groupBy: jest.fn().mockResolvedValue([
+          { crm_stage_id: 'stage-1', _count: { id: 97 } },
+          { crm_stage_id: 'stage-2', _count: { id: 150 } },
+          { crm_stage_id: 'stage-3', _count: { id: 154 } },
+          { crm_stage_id: null, _count: { id: 1 } },
+        ]),
+        count: jest.fn().mockResolvedValueOnce(402).mockResolvedValueOnce(1).mockResolvedValueOnce(3),
+      },
+      $transaction: jest.fn((operations: Array<Promise<unknown>>) => Promise.all(operations)),
+    };
+    const service = new CrmService(prisma as never, {} as never, {} as never, {} as never);
+
+    const result = await service.boardSummary('funnel-1', 'instance-1');
+
+    expect(result.total).toBe(402);
+    expect(Object.values(result.stages).reduce((sum, count) => sum + count, 0)).toBe(401);
+    expect(result.withoutStage).toBe(1);
+    expect(result.withoutFunnel).toBe(3);
+    expect(prisma.contacts.groupBy).toHaveBeenCalledWith(expect.objectContaining({
+      by: ['crm_stage_id'],
+      where: expect.objectContaining({ whatsapp_config_id: 'instance-1', crm_funnel_id: 'funnel-1' }),
+    }));
+  });
+});

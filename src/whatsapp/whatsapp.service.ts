@@ -856,6 +856,11 @@ export class WhatsappService {
       sender.picture,
       sender.photo,
     );
+    const contactProfilePicture = isGroup
+      ? chatProfilePicture
+      : fromMe
+        ? chatProfilePicture
+        : (senderProfilePicture ?? chatProfilePicture);
     const contactMetadata = {
       isGroup,
       chatId,
@@ -863,10 +868,12 @@ export class WhatsappService {
       last_sender_id: this.string(sender.id),
       lid: this.string(sender.lid) ?? (phone.endsWith('@lid') ? phone : null),
       last_sender_name: this.first(sender.pushName, sender.verifiedBizName),
-      last_sender_picture: senderProfilePicture,
-      profile_picture: isGroup
-        ? (chatProfilePicture ?? null)
-        : (chatProfilePicture ?? senderProfilePicture ?? null),
+      ...(!fromMe && senderProfilePicture
+        ? { last_sender_picture: senderProfilePicture }
+        : {}),
+      ...(contactProfilePicture
+        ? { profile_picture: contactProfilePicture }
+        : {}),
       last_message_at: occurredAt.toISOString(),
       ...(isGroup
         ? {

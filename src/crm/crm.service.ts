@@ -295,6 +295,61 @@ export class CrmService {
     };
   }
 
+  async cleanupPreview(data: Record<string, unknown>) {
+    const where = await this.cleanupContactWhere(data);
+    const [contacts, messages] = await this.prisma.$transaction([
+      this.prisma.contacts.count({ where }),
+      this.prisma.messages.count({ where: { contacts: { is: where } } }),
+    ]);
+    return { ok: true, contacts, messages };
+  }
+
+  async cleanupExecute(data: Record<string, unknown>) {
+    const action = this.string(data.action);
+    if (!['unlink_crm', 'delete_messages', 'delete_contacts'].includes(action || ''))
+      throw new BadRequestException('Ação de limpeza inválida');
+    if (this.string(data.confirmation)?.toUpperCase() !== 'APAGAR')
+      throw new BadRequestException('Digite APAGAR para confirmar');
+    const where = await this.cleanupContactWhere(data);
+    const preview = await this.cleanupPreview(data);
+    if (action === 'unlink_crm') {
+      const result = await this.prisma.contacts.updateMany({
+        where,
+        data: { crm_funnel_id: null, crm_stage_id: null },
+      });
+      return { ok: true, action, contacts: result.count, messages: 0 };
+    }
+    if (action === 'delete_messages') {
+      const result = await this.prisma.messages.deleteMany({
+        where: { contacts: { is: where } },
+      });
+      return { ok: true, action, contacts: preview.contacts, messages: result.count };
+    }
+    const result = await this.prisma.contacts.deleteMany({ where });
+    return { ok: true, action, contacts: result.count, messages: preview.messages };
+  }
+
+  private async cleanupContactWhere(data: Record<string, unknown>): Promise<Prisma.contactsWhereInput> {
+    const instanceId = this.string(data.instance_id);
+    const funnelId = this.string(data.funnel_id);
+    const stageId = this.string(data.stage_id);
+    if (funnelId) {
+      const funnel = await this.prisma.crm_funnels.findUnique({ where: { id: funnelId } });
+      if (!funnel || (instanceId && funnel.whatsapp_config_id !== instanceId))
+        throw new BadRequestException('Funil inválido para a instância selecionada');
+    }
+    if (stageId) {
+      const stage = await this.prisma.crm_stages.findUnique({ where: { id: stageId } });
+      if (!stage || (funnelId && stage.funnel_id !== funnelId))
+        throw new BadRequestException('Etapa inválida para o funil selecionado');
+    }
+    return {
+      ...(instanceId ? { whatsapp_config_id: instanceId } : {}),
+      ...(funnelId ? { crm_funnel_id: funnelId } : {}),
+      ...(stageId ? { crm_stage_id: stageId } : {}),
+    };
+  }
+
   private contactForClient(contact: any) {
     const { crm_contact_tags, ...rest } = contact;
     return {

@@ -55,6 +55,20 @@ export class CrmController {
   ) {
     return this.crm.importContacts(body, request.user);
   }
+  @Post('admin/data-cleanup/preview') cleanupPreview(
+    @Req() request: Request & { user: { role: string } },
+    @Body() body: Record<string, unknown>,
+  ) {
+    this.assertAdmin(request);
+    return this.crm.cleanupPreview(body);
+  }
+  @Post('admin/data-cleanup/execute') cleanupExecute(
+    @Req() request: Request & { user: { role: string } },
+    @Body() body: Record<string, unknown>,
+  ) {
+    this.assertAdmin(request);
+    return this.crm.cleanupExecute(body);
+  }
   @Patch('contacts/:id') update(
     @Req() request: Request & { user: { sub: string; role: string } },
     @Param('id') id: string,

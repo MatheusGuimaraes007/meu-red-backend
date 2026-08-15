@@ -76,6 +76,20 @@ export class CrmController {
   ) {
     return this.crm.updateContact(id, body, request.user);
   }
+  @Delete('contacts/:id') deleteContact(
+    @Req() request: Request & { user: { sub: string; role: string } },
+    @Param('id') id: string,
+  ) {
+    this.assertAdmin(request);
+    return this.crm.deleteContact(id, request.user);
+  }
+  @Post('contacts/bulk-delete') bulkDeleteContacts(
+    @Req() request: Request & { user: { sub: string; role: string } },
+    @Body() body: Record<string, unknown>,
+  ) {
+    this.assertAdmin(request);
+    return this.crm.bulkDeleteContacts(body, request.user);
+  }
   @Get('contacts/:id/messages') messages(
     @Req() request: Request & { user: { sub: string; role: string } },
     @Param('id') id: string,

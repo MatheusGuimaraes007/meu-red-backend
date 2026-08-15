@@ -59,7 +59,7 @@ export class CrmService {
     const where: Prisma.contactsWhereInput = {
       ...(await this.contactAccessWhere(user)),
       ...(instance ? { whatsapp_config_id: instance } : {}),
-      ...(funnel ? { crm_funnel_id: funnel } : {}),
+      ...(funnel ? { crm_funnel_id: funnel, ...this.groupExclusionWhere() } : {}),
       ...(stage ? { crm_stage_id: stage === 'none' ? null : stage } : {}),
       ...(tag ? { crm_contact_tags: { some: { tag_id: tag } } } : {}),
       ...(search
@@ -111,6 +111,7 @@ export class CrmService {
     }
     const filtered: Prisma.contactsWhereInput = {
       ...(await this.contactAccessWhere(user)), whatsapp_config_id: instanceId, crm_funnel_id: funnelId,
+      ...this.groupExclusionWhere(),
       ...(tagId ? { crm_contact_tags: { some: { tag_id: tagId } } } : {}),
       ...(search ? { OR: [{ name: { contains: search, mode: 'insensitive' } }, { phone_number: { contains: search } }] } : {}),
     };
@@ -172,6 +173,12 @@ export class CrmService {
         ...this.metadataObject(data.metadata),
         ...(typeof data.name === 'string' ? { name_source: 'manual' } : {}),
       });
+    if (
+      (('crm_funnel_id' in data && data.crm_funnel_id) ||
+        ('crm_stage_id' in data && data.crm_stage_id)) &&
+      this.isGroupContact(existing)
+    )
+      throw new BadRequestException('Grupos não podem ser adicionados ao CRM');
     if ('crm_funnel_id' in data)
       update.crm_funnels = data.crm_funnel_id
         ? { connect: { id: String(data.crm_funnel_id) } }
@@ -295,6 +302,58 @@ export class CrmService {
     };
   }
 
+  async deleteContact(id: string, user?: { sub: string; role: string }) {
+    const contact = await this.authorizedContact(id, user);
+    await this.prisma.contacts.delete({ where: { id: contact.id } });
+    this.realtime.emit(
+      'contact:deleted',
+      { id: contact.id } as Record<string, unknown>,
+      [
+        this.realtime.contact(contact.id),
+        ...(contact.whatsapp_config_id
+          ? [this.realtime.instance(contact.whatsapp_config_id)]
+          : []),
+      ],
+    );
+    return { ok: true };
+  }
+
+  async bulkDeleteContacts(
+    data: Record<string, unknown>,
+    user?: { sub: string; role: string },
+  ) {
+    const ids = Array.isArray(data.contact_ids)
+      ? ([
+          ...new Set(
+            data.contact_ids.map((id) => this.string(id)).filter(Boolean),
+          ),
+        ] as string[])
+      : [];
+    if (!ids.length) throw new BadRequestException('Selecione pelo menos um contato');
+    if (ids.length > 500)
+      throw new BadRequestException('Selecione no máximo 500 contatos por vez');
+    const targets = await this.prisma.contacts.findMany({
+      where: { id: { in: ids }, ...(await this.contactAccessWhere(user)) },
+      select: { id: true, whatsapp_config_id: true },
+    });
+    const result = await this.prisma.contacts.deleteMany({
+      where: { id: { in: targets.map((item) => item.id) } },
+    });
+    targets.forEach((contact) =>
+      this.realtime.emit(
+        'contact:deleted',
+        { id: contact.id } as Record<string, unknown>,
+        [
+          this.realtime.contact(contact.id),
+          ...(contact.whatsapp_config_id
+            ? [this.realtime.instance(contact.whatsapp_config_id)]
+            : []),
+        ],
+      ),
+    );
+    return { ok: true, count: result.count };
+  }
+
   async cleanupPreview(data: Record<string, unknown>) {
     const where = await this.cleanupContactWhere(data);
     const [contacts, messages] = await this.prisma.$transaction([
@@ -357,6 +416,26 @@ export class CrmService {
       tags: Array.isArray(crm_contact_tags)
         ? crm_contact_tags.map((item) => item.crm_tags)
         : [],
+    };
+  }
+
+  private isGroupContact(contact: { phone_number?: string | null; metadata?: unknown }) {
+    const metadata = this.object(contact.metadata);
+    return (
+      metadata.isGroup === true ||
+      metadata.is_group === true ||
+      !!contact.phone_number?.endsWith('@g.us')
+    );
+  }
+
+  private groupExclusionWhere(): Prisma.contactsWhereInput {
+    return {
+      NOT: {
+        OR: [
+          { metadata: { path: ['isGroup'], equals: true } },
+          { phone_number: { endsWith: '@g.us' } },
+        ],
+      },
     };
   }
 
@@ -788,6 +867,7 @@ export class CrmService {
       where: {
         whatsapp_config_id: funnel.whatsapp_config_id,
         crm_funnel_id: null,
+        ...this.groupExclusionWhere(),
         ...(term
           ? {
               OR: [
@@ -833,6 +913,7 @@ export class CrmService {
         id: { in: contactIds as string[] },
         whatsapp_config_id: funnel.whatsapp_config_id,
         crm_funnel_id: null,
+        ...this.groupExclusionWhere(),
       },
       data: { crm_funnel_id: funnelId, crm_stage_id: stageId },
     });

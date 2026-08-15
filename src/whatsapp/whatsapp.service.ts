@@ -17,6 +17,11 @@ import {
   CreateWhatsappInstanceDto,
   UpdateWhatsappInstanceDto,
 } from './dto/whatsapp.dto';
+import {
+  primaryIdentifier,
+  resolvePayloadIdentity,
+  type ResolvedIdentity,
+} from './whatsapp-identity.resolver';
 
 type ProviderPayload = Record<string, any>;
 
@@ -588,15 +593,18 @@ export class WhatsappService {
     });
     try {
       let result: Record<string, unknown>;
-      if (
-        [
-          'webhookConnected',
-          'webhookDisconnected',
-          'webhookStatus',
-          'webhookPresence',
-        ].includes(eventType)
-      ) {
+      if (['webhookConnected', 'webhookDisconnected'].includes(eventType)) {
         result = await this.processStatusWebhook(payload, providerInstanceId);
+      } else if (eventType === 'webhookStatus') {
+        // webhookStatus representa o status de uma MENSAGEM (DELIVERY/READ/
+        // PLAYED), nunca o status da instância WhatsApp.
+        result = await this.processMessageStatusWebhook(
+          payload,
+          providerInstanceId,
+        );
+      } else if (eventType === 'webhookPresence') {
+        // Presença/digitando não altera o status da instância.
+        result = { ignored: true, reason: 'Evento de presença' };
       } else if (eventType === 'webhookDelivery') {
         result = await this.processDeliveryWebhook(payload, providerInstanceId);
       } else if (eventType === 'webhookReceived') {
@@ -764,6 +772,40 @@ export class WhatsappService {
     return { instance: this.safe(updated) };
   }
 
+  private async processMessageStatusWebhook(
+    payload: ProviderPayload,
+    providerInstanceId?: string,
+  ) {
+    const instance = await this.findProvider(providerInstanceId);
+    const externalMessageId = this.string(payload.messageId);
+    if (!externalMessageId)
+      return { ignored: true, reason: 'messageId ausente' };
+    const status = this.deliveryStatus(payload);
+    const message = await this.prisma.messages.findFirst({
+      where: {
+        whatsapp_config_id: instance.id,
+        external_message_id: externalMessageId,
+      },
+    });
+    if (!message) return { ignored: true, reason: 'Mensagem não encontrada' };
+    const updated = await this.prisma.messages.update({
+      where: { id: message.id },
+      data: {
+        status,
+        ...(status === 'read' && !message.read_at
+          ? { read_at: new Date() }
+          : {}),
+        updated_at: new Date(),
+      },
+    });
+    const clientMessage = this.messageForRealtime(updated);
+    this.realtime.emit('message:status', clientMessage, [
+      this.realtime.instance(instance.id),
+      this.realtime.contact(updated.contact_id),
+    ]);
+    return { messageId: String(updated.id), status };
+  }
+
   private async processDeliveryWebhook(
     payload: ProviderPayload,
     providerInstanceId?: string,
@@ -823,38 +865,16 @@ export class WhatsappService {
     const externalMessageId = this.string(payload.messageId);
     const chat = this.record(payload.chat);
     const sender = this.record(payload.sender);
-    const chatId = this.string(chat.id);
-    if (!externalMessageId || !chatId)
+    if (!externalMessageId || !this.string(chat.id))
       throw new BadRequestException('Payload de mensagem incompleto');
-    const isGroup = payload.isGroup === true && chatId.endsWith('@g.us');
-    const fromMe = payload.fromMe === true;
-    const phone = isGroup
-      ? chatId
-      : fromMe
-        ? chatId
-        : (this.string(sender.id) ?? chatId);
-    const aliases = [
-      phone,
-      chatId,
-      this.string(sender.id),
-      this.string(sender.phone),
-      this.string(sender.number),
-      this.string(sender.lid),
-    ].filter((value): value is string => Boolean(value));
-    const existing = await this.prisma.contacts.findFirst({
-      where: {
-        whatsapp_config_id: instance.id,
-        OR: [
-          { phone_number: { in: aliases } },
-          ...aliases.flatMap((alias) => [
-            { metadata: { path: ['chatId'], equals: alias } },
-            { metadata: { path: ['last_sender_id'], equals: alias } },
-            { metadata: { path: ['lid'], equals: alias } },
-          ]),
-        ],
-      },
-      orderBy: { last_interaction: 'desc' },
-    });
+    const identity = resolvePayloadIdentity(payload);
+    const isGroup = identity.type === 'group';
+    const fromMe = identity.type === 'private' && identity.fromMe;
+    const chatId = identity.chatId;
+    const phone = primaryIdentifier(identity);
+    const existing = await this.findExistingContact(instance.id, identity);
+    const existingMetadata = this.record(existing?.metadata);
+    const nameProtected = existingMetadata.name_source === 'manual';
     const isFirstIncomingMessage =
       !fromMe &&
       !isGroup &&
@@ -884,10 +904,15 @@ export class WhatsappService {
       : null;
     const name = isGroup
       ? groupName!.name
-      : fromMe
-        ? (existing?.name ?? phone)
-        : this.first(sender.verifiedBizName, sender.pushName, phone);
+      : nameProtected
+        ? existing!.name
+        : fromMe
+          ? (existing?.name ?? phone)
+          : this.first(sender.verifiedBizName, sender.pushName, phone);
     const occurredAt = this.messageTimestamp(payload) ?? new Date();
+    // Foto do contato/conversa sempre vem de chat.profilePicture (grupo,
+    // enviado ou recebido). A foto do sender fica isolada nos metadados da
+    // MENSAGEM (sender_profile_picture) e nunca substitui a do contato.
     const chatProfilePicture = this.firstOptional(
       chat.profilePicture,
       chat.profile_picture,
@@ -904,17 +929,15 @@ export class WhatsappService {
       sender.picture,
       sender.photo,
     );
-    const contactProfilePicture = isGroup
-      ? chatProfilePicture
-      : fromMe
-        ? chatProfilePicture
-        : (senderProfilePicture ?? chatProfilePicture);
+    const contactProfilePicture = chatProfilePicture ?? senderProfilePicture;
     const contactMetadata = {
       isGroup,
       chatId,
       needs_reply: !fromMe,
+      // Metadado operacional (quem escreveu a ultima mensagem). NUNCA usar
+      // para localizar contato - ver findExistingContact.
       last_sender_id: this.string(sender.id),
-      lid: this.string(sender.lid) ?? (phone.endsWith('@lid') ? phone : null),
+      lid: identity.type === 'private' ? identity.lid : null,
       last_sender_name: this.first(sender.pushName, sender.verifiedBizName),
       ...(!fromMe && senderProfilePicture
         ? { last_sender_picture: senderProfilePicture }
@@ -939,8 +962,8 @@ export class WhatsappService {
           where: { id: existing.id },
           data: {
             name,
-            ...(!isGroup && !fromMe && !phone.endsWith('@lid')
-              ? { phone_number: phone }
+            ...(identity.type === 'private' && !identity.fromMe && identity.phone
+              ? { phone_number: identity.phone }
               : {}),
             last_interaction: occurredAt,
             metadata: this.merge(existing.metadata, contactMetadata),
@@ -1083,6 +1106,53 @@ export class WhatsappService {
       messageId: String(message.id),
       duplicate: Boolean(existingMessage),
     };
+  }
+
+  /**
+   * Localiza o contato existente a partir da identidade resolvida do
+   * payload. Nunca usa last_sender_id/sender.phone/sender.number como
+   * criterio de busca - apenas telefone confiavel e LID (privado), ou o
+   * proprio chat.id do grupo.
+   */
+  private async findExistingContact(
+    instanceId: string,
+    identity: ResolvedIdentity,
+  ) {
+    if (identity.type === 'group') {
+      return this.prisma.contacts.findFirst({
+        where: { whatsapp_config_id: instanceId, phone_number: identity.groupId },
+        orderBy: { last_interaction: 'desc' },
+      });
+    }
+    const [byPhone, byLid] = await Promise.all([
+      identity.phone
+        ? this.prisma.contacts.findFirst({
+            where: {
+              whatsapp_config_id: instanceId,
+              phone_number: identity.phone,
+            },
+          })
+        : Promise.resolve(null),
+      identity.lid
+        ? this.prisma.contacts.findFirst({
+            where: {
+              whatsapp_config_id: instanceId,
+              OR: [
+                { phone_number: identity.lid },
+                { metadata: { path: ['lid'], equals: identity.lid } },
+              ],
+            },
+            orderBy: { last_interaction: 'desc' },
+          })
+        : Promise.resolve(null),
+    ]);
+    if (byPhone && byLid && byPhone.id !== byLid.id) {
+      this.logger.warn(
+        `identity_conflict: telefone ${identity.phone} e LID ${identity.lid} apontam para contatos distintos (${byPhone.id} vs ${byLid.id}) na instância ${instanceId}. Priorizando LID.`,
+      );
+      return byLid;
+    }
+    return byPhone ?? byLid ?? null;
   }
 
   private async setStatus(
@@ -1301,11 +1371,11 @@ export class WhatsappService {
   private async resolveReplyContext(
     payload: ProviderPayload,
     whatsappConfigId: string,
-    contact: { name: string },
+    contact: { id: string; name: string },
   ) {
     const reference = this.extractReplyContext(payload);
     if (!reference) return undefined;
-    const original = reference.external_message_id
+    const found = reference.external_message_id
       ? await this.prisma.messages.findFirst({
           where: {
             whatsapp_config_id: whatsappConfigId,
@@ -1313,6 +1383,14 @@ export class WhatsappService {
           },
         })
       : null;
+    if (found && found.contact_id !== contact.id) {
+      // Reply aponta para uma mensagem de OUTRO contato canonico - nao
+      // cruzar chats. Mantemos apenas o texto citado como snapshot.
+      this.logger.warn(
+        `reply_identity_mismatch: stanzaID ${reference.external_message_id} pertence ao contato ${found.contact_id}, mensagem atual pertence a ${contact.id}.`,
+      );
+    }
+    const original = found && found.contact_id === contact.id ? found : null;
     const originalMetadata = this.record(original?.metadata);
     const participantIsMe =
       this.sameWhatsappIdentity(
@@ -1774,19 +1852,27 @@ export class WhatsappService {
     const value = String(
       payload.status ?? payload.ack ?? payload.messageStatus ?? '',
     ).toLowerCase();
+    if (value.includes('play')) return 'played';
     if (value.includes('read') || value === '3') return 'read';
     if (value.includes('deliver') || value === '2') return 'delivered';
     if (value.includes('fail') || value.includes('error')) return 'failed';
     return 'sent';
   }
   private webhookExternalId(payload: ProviderPayload) {
+    const event = this.string(payload.event) ?? 'event';
+    const instanceId = this.string(payload.instanceId) ?? '';
     const message = this.string(payload.messageId);
-    if (message)
-      return `${this.string(payload.event) ?? 'event'}:${this.string(payload.instanceId) ?? ''}:${message}`;
+    if (message) {
+      if (event === 'webhookStatus') {
+        // A mesma mensagem passa por DELIVERY -> READ -> PLAYED; sem o status
+        // na chave, a 2a/3a transição seria descartada como duplicata da 1a.
+        const status = this.deliveryStatus(payload).toUpperCase();
+        return `${event}:${instanceId}:${message}:${status}`;
+      }
+      return `${event}:${instanceId}:${message}`;
+    }
     const moment = payload.moment;
-    return moment
-      ? `${this.string(payload.event) ?? 'event'}:${this.string(payload.instanceId) ?? ''}:${moment}`
-      : undefined;
+    return moment ? `${event}:${instanceId}:${moment}` : undefined;
   }
   private merge(current: unknown, update: Record<string, unknown>) {
     return {

@@ -546,6 +546,11 @@ model contacts {
   whatsapp_config              whatsapp_config?               @relation(fields: [whatsapp_config_id], references: [id], onUpdate: NoAction)
   messages                     messages[]
   crm_integration_deliveries   crm_integration_deliveries[]
+  // FASE 1 (cards): contacts.crm_funnel_id/crm_stage_id continuam existindo
+  // como legado durante a transicao (ver secao 12 do documento). A posicao
+  // de trabalho real passa a viver em crm_cards.
+  crm_cards                    crm_cards[]
+  crm_card_movements           crm_card_movements[]
 
   @@unique([whatsapp_config_id, phone_number], map: "contacts_instance_phone_idx")
   @@index([crm_stage_id], map: "contacts_crm_stage_idx")
@@ -563,15 +568,27 @@ model crm_funnels {
   is_default                  Boolean                       @default(false)
   created_at                  DateTime                      @default(now()) @db.Timestamptz(6)
   updated_at                  DateTime                      @default(now()) @db.Timestamptz(6)
+  // FASE 1 (cards): kind=null significa funil ainda nao classificado
+  // (legado). Sera classificado explicitamente na Fase 7 (dry-run), nunca
+  // automaticamente. Um usuario pode ser owner de varios funis sales.
+  kind                        crm_card_kind?
+  owner_user_id               String?                       @db.Uuid
+  owner                       crm_users?                    @relation("FunnelOwner", fields: [owner_user_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
   contacts                    contacts[]
   crm_user_funnel_permissions crm_user_funnel_permissions[]
   whatsapp_config             whatsapp_config?              @relation(fields: [whatsapp_config_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
   crm_stages                  crm_stages[]
   entry_stage                 crm_stages?                   @relation("crm_funnel_entry_stage", fields: [entry_stage_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
   crm_integration_automations crm_integration_automations[]
+  crm_cards                   crm_cards[]
+  card_movements_from         crm_card_movements[]          @relation("MovementFromFunnel")
+  card_movements_to           crm_card_movements[]          @relation("MovementToFunnel")
+  automation_rules_source     crm_automation_rules[]        @relation("AutomationSourceFunnel")
 
   @@index([whatsapp_config_id, is_default], map: "crm_funnels_instance_idx")
   @@index([entry_stage_id], map: "crm_funnels_entry_stage_idx")
+  @@index([whatsapp_config_id, kind], map: "crm_funnels_kind_idx")
+  @@index([owner_user_id], map: "crm_funnels_owner_idx")
   @@schema("public")
 }
 
@@ -588,6 +605,10 @@ model crm_stages {
   crm_funnels                 crm_funnels                   @relation(fields: [funnel_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
   entry_for_funnels           crm_funnels[]                 @relation("crm_funnel_entry_stage")
   crm_integration_automations crm_integration_automations[]
+  crm_cards                   crm_cards[]
+  card_movements_from         crm_card_movements[]          @relation("MovementFromStage")
+  card_movements_to           crm_card_movements[]          @relation("MovementToStage")
+  automation_rules_source     crm_automation_rules[]        @relation("AutomationSourceStage")
 
   @@index([funnel_id, position], map: "crm_stages_funnel_position_idx")
   @@schema("public")
@@ -636,6 +657,16 @@ model crm_users {
   crm_user_funnel_permissions    crm_user_funnel_permissions[]
   crm_user_instance_permissions  crm_user_instance_permissions[]
   message_edits                  message_edits[]
+  // FASE 1 (cards): department=null para usuarios existentes ate
+  // classificacao manual (nao alterar automaticamente - ver secao 12).
+  department                     crm_department?
+  owned_funnels                  crm_funnels[]                    @relation("FunnelOwner")
+  assigned_cards                 crm_cards[]                      @relation("CardAssignedUser")
+  card_movements_actor           crm_card_movements[]             @relation("MovementActor")
+  card_movements_from_user       crm_card_movements[]             @relation("MovementFromUser")
+  card_movements_to_user         crm_card_movements[]             @relation("MovementToUser")
+  automation_rules_created       crm_automation_rules[]           @relation("AutomationCreatedBy")
+  sent_messages                  messages[]                       @relation("MessageSender")
 
   @@schema("public")
 }
@@ -708,24 +739,24 @@ model knowledge_base {
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 /// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
 model messages {
-  id                     BigInt           @id @default(autoincrement())
-  contact_id             String           @db.Uuid
+  id                     BigInt               @id @default(autoincrement())
+  contact_id             String               @db.Uuid
   role                   String
   content                String
-  created_at             DateTime         @default(now()) @db.Timestamptz(6)
-  whatsapp_config_id     String?          @db.Uuid
+  created_at             DateTime             @default(now()) @db.Timestamptz(6)
+  whatsapp_config_id     String?              @db.Uuid
   external_message_id    String?
-  message_type           String           @default("text")
-  metadata               Json             @default("{}")
-  status                 String           @default("sent")
+  message_type           String               @default("text")
+  metadata               Json                 @default("{}")
+  status                 String               @default("sent")
   error_message          String?
   client_message_id      String?
   original_content       String?
   edited_content         String?
-  updated_at             DateTime         @default(now()) @db.Timestamptz(6)
-  deleted_on_whatsapp    Boolean          @default(false)
-  deleted_at             DateTime?        @db.Timestamptz(6)
-  read_at                DateTime?        @db.Timestamptz(6)
+  updated_at             DateTime             @default(now()) @db.Timestamptz(6)
+  deleted_on_whatsapp    Boolean              @default(false)
+  deleted_at             DateTime?            @db.Timestamptz(6)
+  read_at                DateTime?            @db.Timestamptz(6)
   media_storage_bucket   String?
   media_storage_path     String?
   media_mime_type        String?
@@ -735,15 +766,23 @@ model messages {
   media_duration_seconds Int?
   media_status           String?
   media_error            String?
+  // FASE 3 (cards): auditoria de quem enviou e em qual contexto. Nulo para
+  // mensagens recebidas do cliente e para o historico anterior a esta fase.
+  sent_by_user_id        String?              @db.Uuid
+  sent_by_context        crm_message_context?
+  crm_card_id            String?              @db.Uuid
   message_edits          message_edits[]
-  contacts               contacts         @relation(fields: [contact_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  whatsapp_config        whatsapp_config? @relation(fields: [whatsapp_config_id], references: [id], onUpdate: NoAction)
+  contacts               contacts             @relation(fields: [contact_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  whatsapp_config        whatsapp_config?     @relation(fields: [whatsapp_config_id], references: [id], onUpdate: NoAction)
+  sent_by                crm_users?           @relation("MessageSender", fields: [sent_by_user_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  crm_card               crm_cards?           @relation(fields: [crm_card_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
 
   @@unique([whatsapp_config_id, external_message_id], map: "messages_instance_external_message_idx")
   @@index([contact_id], map: "idx_messages_contact_id")
   @@index([contact_id, created_at], map: "idx_messages_created_at")
   @@index([whatsapp_config_id], map: "messages_whatsapp_config_idx")
   @@index([status, created_at(sort: Desc)], map: "idx_messages_status_created_at")
+  @@index([crm_card_id], map: "idx_messages_crm_card_id")
   @@schema("public")
 }
 
@@ -853,6 +892,7 @@ model whatsapp_config {
   messages                      messages[]
   user_whatsapp_instances       user_whatsapp_instances[]
   crm_integration_automations   crm_integration_automations[]
+  crm_automation_rules          crm_automation_rules[]
 
   @@unique([provider, provider_instance_id], map: "whatsapp_config_provider_instance_idx")
   @@index([provider_instance_id], map: "idx_whatsapp_config_provider_instance")
@@ -948,6 +988,195 @@ model message_edits {
   messages         messages   @relation(fields: [message_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 
   @@index([message_id, created_at(sort: Desc)], map: "idx_message_edits_message_created")
+  @@schema("public")
+}
+
+// =====================================================================
+// FASE 1 (CARDS COMERCIAL/SUPORTE) - preparado em 15/08/2026, NAO aplicado
+// em producao. Ver PROMPT_CODEX_ATUALIZACOES_CRM_PIPELINES_AUTOMACOES_CSV.
+//
+// contacts continua sendo a identidade unica do WhatsApp. crm_cards
+// representa uma posicao de trabalho (comercial OU suporte) daquele
+// contato. Um contato pode ter no maximo 1 card "sales" ativo e 1 card
+// "support" ativo simultaneamente - essa regra e reforcada por indices
+// unicos parciais criados via SQL manual (Prisma nao expressa indice
+// parcial na DSL), ver prisma/manual-migrations/20260815_crm_cards.sql.
+//
+// contacts.crm_funnel_id/crm_stage_id permanecem como legado durante a
+// transicao (Fase 7-9 tratam da migracao/depreciacao).
+// =====================================================================
+
+/// Card de trabalho (comercial ou suporte) de um contato. Ver indices
+/// parciais unicos em prisma/manual-migrations/20260815_crm_cards.sql:
+/// no maximo 1 card "sales" ativo e 1 "support" ativo por contact_id.
+model crm_cards {
+  id                    String                      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  contact_id            String                      @db.Uuid
+  kind                  crm_card_kind
+  funnel_id             String                      @db.Uuid
+  stage_id              String                      @db.Uuid
+  assigned_user_id      String?                     @db.Uuid
+  status                crm_card_status             @default(active)
+  source                crm_card_source
+  stage_entered_at      DateTime                    @default(now()) @db.Timestamptz(6)
+  assigned_at           DateTime?                   @db.Timestamptz(6)
+  closed_at             DateTime?                   @db.Timestamptz(6)
+  metadata              Json?                       @default("{}")
+  created_at            DateTime                    @default(now()) @db.Timestamptz(6)
+  updated_at            DateTime                    @default(now()) @db.Timestamptz(6)
+  contacts              contacts                    @relation(fields: [contact_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  crm_funnels           crm_funnels                 @relation(fields: [funnel_id], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  crm_stages            crm_stages                  @relation(fields: [stage_id], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  assigned_user         crm_users?                  @relation("CardAssignedUser", fields: [assigned_user_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  movements             crm_card_movements[]
+  messages              messages[]
+  automation_executions crm_automation_executions[]
+
+  @@index([contact_id, kind, status], map: "crm_cards_contact_kind_status_idx")
+  @@index([funnel_id, stage_id], map: "crm_cards_funnel_stage_idx")
+  @@index([assigned_user_id, status], map: "crm_cards_assigned_user_idx")
+  @@index([stage_id, stage_entered_at], map: "crm_cards_stage_entered_idx")
+  @@schema("public")
+}
+
+/// Auditoria de toda movimentacao relevante de um crm_card.
+model crm_card_movements {
+  id                 String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  card_id            String                @db.Uuid
+  contact_id         String                @db.Uuid
+  kind               crm_card_kind
+  event_type         crm_card_event_type
+  from_user_id       String?               @db.Uuid
+  to_user_id         String?               @db.Uuid
+  from_funnel_id     String?               @db.Uuid
+  to_funnel_id       String?               @db.Uuid
+  from_stage_id      String?               @db.Uuid
+  to_stage_id        String?               @db.Uuid
+  actor_user_id      String?               @db.Uuid
+  automation_rule_id String?               @db.Uuid
+  reason             String?
+  metadata           Json?                 @default("{}")
+  created_at         DateTime              @default(now()) @db.Timestamptz(6)
+  card               crm_cards             @relation(fields: [card_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  contacts           contacts              @relation(fields: [contact_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  from_user          crm_users?            @relation("MovementFromUser", fields: [from_user_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  to_user            crm_users?            @relation("MovementToUser", fields: [to_user_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  from_funnel        crm_funnels?          @relation("MovementFromFunnel", fields: [from_funnel_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  to_funnel          crm_funnels?          @relation("MovementToFunnel", fields: [to_funnel_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  from_stage         crm_stages?           @relation("MovementFromStage", fields: [from_stage_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  to_stage           crm_stages?           @relation("MovementToStage", fields: [to_stage_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  actor              crm_users?            @relation("MovementActor", fields: [actor_user_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  automation_rule    crm_automation_rules? @relation(fields: [automation_rule_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+
+  @@index([card_id, created_at(sort: Desc)], map: "crm_card_movements_card_idx")
+  @@index([contact_id, created_at(sort: Desc)], map: "crm_card_movements_contact_idx")
+  @@schema("public")
+}
+
+/// Regra de automacao configuravel (trigger + acao) sobre crm_cards.
+model crm_automation_rules {
+  id                 String                      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  whatsapp_config_id String                      @db.Uuid
+  name               String
+  enabled            Boolean                     @default(true)
+  card_kind          crm_card_kind?
+  trigger_type       String
+  source_funnel_id   String?                     @db.Uuid
+  source_stage_id    String?                     @db.Uuid
+  delay_seconds      Int?
+  trigger_config     Json?                       @default("{}")
+  action_config      Json?                       @default("{}")
+  priority           Int                         @default(0)
+  created_by         String?                     @db.Uuid
+  created_at         DateTime                    @default(now()) @db.Timestamptz(6)
+  updated_at         DateTime                    @default(now()) @db.Timestamptz(6)
+  whatsapp_config    whatsapp_config             @relation(fields: [whatsapp_config_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  source_funnel      crm_funnels?                @relation("AutomationSourceFunnel", fields: [source_funnel_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  source_stage       crm_stages?                 @relation("AutomationSourceStage", fields: [source_stage_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  creator            crm_users?                  @relation("AutomationCreatedBy", fields: [created_by], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  movements          crm_card_movements[]
+  executions         crm_automation_executions[]
+
+  @@index([whatsapp_config_id, enabled], map: "crm_automation_rules_instance_idx")
+  @@index([trigger_type], map: "crm_automation_rules_trigger_idx")
+  @@schema("public")
+}
+
+/// Registro de execucao de uma regra, com chave de idempotencia para
+/// impedir que o worker execute a mesma regra 2x sobre a mesma permanencia.
+model crm_automation_executions {
+  id          String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  rule_id     String               @db.Uuid
+  card_id     String?              @db.Uuid
+  contact_id  String?              @db.Uuid
+  trigger_key String
+  status      String
+  result      Json?                @default("{}")
+  error       String?
+  executed_at DateTime             @default(now()) @db.Timestamptz(6)
+  rule        crm_automation_rules @relation(fields: [rule_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  card        crm_cards?           @relation(fields: [card_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+
+  @@unique([rule_id, trigger_key], map: "crm_automation_executions_idempotency_idx")
+  @@index([card_id], map: "crm_automation_executions_card_idx")
+  @@schema("public")
+}
+
+enum crm_card_kind {
+  sales
+  support
+
+  @@schema("public")
+}
+
+enum crm_card_status {
+  active
+  closed
+
+  @@schema("public")
+}
+
+enum crm_card_source {
+  manual
+  first_message
+  csv_import
+  automation
+  claim
+  transfer
+  migration
+
+  @@schema("public")
+}
+
+enum crm_card_event_type {
+  created
+  claimed
+  assigned
+  transferred
+  stage_changed
+  funnel_changed
+  closed
+  reopened
+  automation
+
+  @@schema("public")
+}
+
+enum crm_department {
+  sales
+  support
+  both
+  management
+
+  @@schema("public")
+}
+
+enum crm_message_context {
+  sales
+  support
+  automation
+  system
+
   @@schema("public")
 }
 

@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unnecessary-type-assertion, @typescript-eslint/no-base-to-string */
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -146,6 +147,53 @@ export class CrmService {
     });
     if (!contact) throw new NotFoundException('Contato não encontrado');
     return contact;
+  }
+
+  /**
+   * FASE 3 (cards): decide em qual contexto (sales/support) uma mensagem
+   * está sendo enviada e bloqueia o envio se o usuário não for mais o
+   * responsável pelo card ativo daquele contexto (vendedor que perdeu o
+   * lead na transferência, por exemplo). Master/admin sempre podem enviar;
+   * gestor segue o mesmo escopo de acesso já validado por
+   * authorizedContact. Nunca confiar apenas em um botão desabilitado no
+   * frontend - esta checagem é a fonte de verdade.
+   */
+  private async resolveSendContext(
+    contactId: string,
+    user: { sub: string; role: string } | undefined,
+    requestedContext: unknown,
+  ): Promise<{ context: 'sales' | 'support' | null; cardId: string | null }> {
+    const wantedKind = this.messageContext(requestedContext);
+    if (!user || this.isAdmin(user) || user.role === 'manager')
+      return { context: wantedKind, cardId: null };
+    const cards = await this.prisma.crm_cards.findMany({
+      where: { contact_id: contactId, status: 'active' },
+    });
+    if (wantedKind) {
+      const relevant = cards.find((card) => card.kind === wantedKind);
+      if (
+        relevant?.assigned_user_id &&
+        relevant.assigned_user_id !== user.sub
+      )
+        throw new ForbiddenException(
+          `Você não é mais o responsável (${wantedKind === 'sales' ? 'comercial' : 'suporte'}) por este contato.`,
+        );
+      return { context: wantedKind, cardId: relevant?.id ?? null };
+    }
+    const own = cards.find((card) => card.assigned_user_id === user.sub);
+    if (own) return { context: own.kind, cardId: own.id };
+    const takenByOther = cards.find(
+      (card) => card.assigned_user_id && card.assigned_user_id !== user.sub,
+    );
+    if (takenByOther)
+      throw new ForbiddenException(
+        'Este contato já está atribuído a outro responsável.',
+      );
+    return { context: null, cardId: null };
+  }
+
+  private messageContext(value: unknown): 'sales' | 'support' | null {
+    return value === 'sales' || value === 'support' ? value : null;
   }
 
   async updateContact(
@@ -487,6 +535,11 @@ export class CrmService {
     user?: { sub: string; role: string },
   ) {
     await this.authorizedContact(contactId, user);
+    const sendContext = await this.resolveSendContext(
+      contactId,
+      user,
+      body.context,
+    );
     const contact = await this.prisma.contacts.findUnique({
       where: { id: contactId },
       include: { whatsapp_config: true },
@@ -533,6 +586,9 @@ export class CrmService {
           ? Number(body.durationSeconds)
           : null,
         media_status: type === 'text' ? null : 'completed',
+        sent_by_user_id: user?.sub ?? null,
+        sent_by_context: sendContext.context,
+        crm_card_id: sendContext.cardId,
         metadata: this.json({
           outbound: this.outboundSnapshot(body),
           queued_at: new Date().toISOString(),

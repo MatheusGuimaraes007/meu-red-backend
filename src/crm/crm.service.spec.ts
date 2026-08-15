@@ -99,6 +99,7 @@ describe('CrmService board totals', () => {
       whatsapp_config: { findFirst: jest.fn().mockResolvedValue({ id: 'instance-1' }) },
       crm_funnels: { findFirst: jest.fn().mockResolvedValue({ id: 'funnel-1', whatsapp_config_id: 'instance-1' }) },
       contacts: {
+        findMany: jest.fn().mockResolvedValue([]),
         groupBy: jest.fn().mockResolvedValue([
           { crm_stage_id: 'stage-1', _count: { id: 97 } },
           { crm_stage_id: 'stage-2', _count: { id: 150 } },

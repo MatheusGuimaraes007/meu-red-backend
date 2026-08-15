@@ -41,6 +41,82 @@ export class CrmCardsService {
     return cards.map((card) => this.cardForClient(card));
   }
 
+  /**
+   * Listagem de cards para o board de um funil (comercial ou suporte),
+   * com dados do contato para renderizar o card. Espelha o padrao de
+   * paginacao por etapa ja usado em contacts()/fetchStage() no board legado.
+   */
+  async listBoardCards(query: {
+    funnel_id?: string;
+    stage_id?: string;
+    assigned_user_id?: string;
+    page?: string;
+    limit?: string;
+  }) {
+    const funnelId = this.string(query.funnel_id);
+    if (!funnelId) throw new BadRequestException('funnel_id é obrigatório');
+    const page = Math.max(1, Number.parseInt(query.page || '1', 10) || 1);
+    const limit = Math.min(100, Math.max(1, Number.parseInt(query.limit || '25', 10) || 25));
+    const where: Prisma.crm_cardsWhereInput = {
+      funnel_id: funnelId,
+      status: 'active',
+      ...(query.stage_id ? { stage_id: query.stage_id } : {}),
+      ...(query.assigned_user_id ? { assigned_user_id: query.assigned_user_id } : {}),
+    };
+    const [items, total] = await this.prisma.$transaction([
+      this.prisma.crm_cards.findMany({
+        where,
+        orderBy: { stage_entered_at: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+        include: {
+          assigned_user: { select: { id: true, name: true, email: true } },
+          contacts: {
+            include: {
+              _count: { select: { messages: true } },
+              messages: { orderBy: { created_at: 'desc' }, take: 1 },
+              crm_contact_tags: { include: { crm_tags: true } },
+            },
+          },
+        },
+      }),
+      this.prisma.crm_cards.count({ where }),
+    ]);
+    return {
+      items: items.map((card) => this.cardForClient(card)),
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+        hasNext: page * limit < total,
+      },
+    };
+  }
+
+  /** Contagem de cards ativos por etapa, para o cabeçalho de cada coluna. */
+  async boardSummary(funnelId: string) {
+    const [rawGroups, unassigned] = await this.prisma.$transaction([
+      this.prisma.crm_cards.groupBy({
+        by: ['stage_id'],
+        where: { funnel_id: funnelId, status: 'active' },
+        orderBy: { stage_id: 'asc' },
+        _count: { id: true },
+      }),
+      this.prisma.crm_cards.count({
+        where: { funnel_id: funnelId, status: 'active', assigned_user_id: null },
+      }),
+    ]);
+    const groups = rawGroups as Array<{ stage_id: string; _count: { id: number } }>;
+    const total = groups.reduce((sum, item) => sum + item._count.id, 0);
+    return {
+      total,
+      unassigned,
+      stages: Object.fromEntries(groups.map((item) => [item.stage_id, item._count.id])),
+      generatedAt: new Date().toISOString(),
+    };
+  }
+
   async getCardMovements(cardId: string, user?: AuthUser) {
     const card = await this.requireCard(cardId);
     await this.crm.contact(card.contact_id, user); // valida acesso ao contato do card

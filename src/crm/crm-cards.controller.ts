@@ -5,6 +5,7 @@ import {
   Param,
   Post,
   Patch,
+  Query,
   Req,
   UseGuards,
 } from '@nestjs/common';
@@ -24,6 +25,28 @@ export class CrmCardsController {
     @Param('id') id: string,
   ) {
     return this.cards.listContactCards(id, request.user);
+  }
+
+  @Get('crm/cards') listBoardCards(
+    @Query('funnel_id') funnelId?: string,
+    @Query('stage_id') stageId?: string,
+    @Query('assigned_user_id') assignedUserId?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.cards.listBoardCards({
+      funnel_id: funnelId,
+      stage_id: stageId,
+      assigned_user_id: assignedUserId,
+      page,
+      limit,
+    });
+  }
+
+  @Get('funnels/:id/cards-board-summary') cardsBoardSummary(
+    @Param('id') id: string,
+  ) {
+    return this.cards.boardSummary(id);
   }
 
   @Post('contacts/:id/cards/sales/claim') claimSalesCard(

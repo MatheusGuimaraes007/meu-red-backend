@@ -60,7 +60,7 @@ export class CrmService {
     const where: Prisma.contactsWhereInput = {
       ...(await this.contactAccessWhere(user)),
       ...(instance ? { whatsapp_config_id: instance } : {}),
-      ...(funnel ? { crm_funnel_id: funnel, ...this.groupExclusionWhere() } : {}),
+      ...(funnel ? { crm_funnel_id: funnel, ...(await this.groupExclusionWhere()) } : {}),
       ...(stage ? { crm_stage_id: stage === 'none' ? null : stage } : {}),
       ...(tag ? { crm_contact_tags: { some: { tag_id: tag } } } : {}),
       ...(search
@@ -112,7 +112,7 @@ export class CrmService {
     }
     const filtered: Prisma.contactsWhereInput = {
       ...(await this.contactAccessWhere(user)), whatsapp_config_id: instanceId, crm_funnel_id: funnelId,
-      ...this.groupExclusionWhere(),
+      ...(await this.groupExclusionWhere()),
       ...(tagId ? { crm_contact_tags: { some: { tag_id: tagId } } } : {}),
       ...(search ? { OR: [{ name: { contains: search, mode: 'insensitive' } }, { phone_number: { contains: search } }] } : {}),
     };
@@ -476,14 +476,23 @@ export class CrmService {
     );
   }
 
-  private groupExclusionWhere(): Prisma.contactsWhereInput {
+  /**
+   * Prisma traduz `NOT: { metadata: { path: [...], equals: true } }` para uma
+   * comparação SQL comum (`<>`/`=`), que retorna NULL - e portanto exclui a
+   * linha do resultado - quando a chave não existe no JSON. Como contatos
+   * importados/comuns nunca gravam `metadata.isGroup`, essa forma negada
+   * zerava o board inteiro. Por isso resolvemos os ids marcados como grupo
+   * primeiro (filtro positivo, sem NOT, não sofre do mesmo problema) e
+   * excluímos por id.
+   */
+  private async groupExclusionWhere(): Promise<Prisma.contactsWhereInput> {
+    const groups = await this.prisma.contacts.findMany({
+      where: { metadata: { path: ['isGroup'], equals: true } },
+      select: { id: true },
+    });
     return {
-      NOT: {
-        OR: [
-          { metadata: { path: ['isGroup'], equals: true } },
-          { phone_number: { endsWith: '@g.us' } },
-        ],
-      },
+      phone_number: { not: { endsWith: '@g.us' } },
+      ...(groups.length ? { id: { notIn: groups.map((item) => item.id) } } : {}),
     };
   }
 
@@ -850,14 +859,24 @@ export class CrmService {
     if (!instanceId) throw new BadRequestException('Instância é obrigatória');
     if (!name) throw new BadRequestException('Nome do funil é obrigatório');
     await this.ensureInstanceAccess(instanceId, user);
+    const kind = this.funnelKind(data.kind);
+    const ownerUserId = this.string(data.owner_user_id);
+    if (ownerUserId && kind !== 'sales')
+      throw new BadRequestException('Apenas funis comerciais podem ter um dono');
     const funnel = await this.prisma.crm_funnels.create({
       data: {
         whatsapp_config_id: instanceId,
         name,
         is_default: false,
+        kind,
+        owner_user_id: kind === 'sales' ? ownerUserId : null,
       },
     });
     return funnel;
+  }
+
+  private funnelKind(value: unknown): 'sales' | 'support' | null {
+    return value === 'sales' || value === 'support' ? value : null;
   }
 
   async updateFunnel(
@@ -869,6 +888,17 @@ export class CrmService {
     const update: Prisma.crm_funnelsUpdateInput = {};
     const name = this.string(data.name);
     if (name) update.name = name;
+    if (Object.prototype.hasOwnProperty.call(data, 'kind'))
+      update.kind = this.funnelKind(data.kind);
+    if (Object.prototype.hasOwnProperty.call(data, 'owner_user_id')) {
+      const ownerUserId = this.string(data.owner_user_id);
+      const nextKind = Object.prototype.hasOwnProperty.call(data, 'kind')
+        ? this.funnelKind(data.kind)
+        : funnel.kind;
+      if (ownerUserId && nextKind !== 'sales')
+        throw new BadRequestException('Apenas funis comerciais podem ter um dono');
+      update.owner = ownerUserId ? { connect: { id: ownerUserId } } : { disconnect: true };
+    }
     const hasEntryStage = Object.prototype.hasOwnProperty.call(
       data,
       'entry_stage_id',
@@ -923,7 +953,7 @@ export class CrmService {
       where: {
         whatsapp_config_id: funnel.whatsapp_config_id,
         crm_funnel_id: null,
-        ...this.groupExclusionWhere(),
+        ...(await this.groupExclusionWhere()),
         ...(term
           ? {
               OR: [
@@ -969,7 +999,7 @@ export class CrmService {
         id: { in: contactIds as string[] },
         whatsapp_config_id: funnel.whatsapp_config_id,
         crm_funnel_id: null,
-        ...this.groupExclusionWhere(),
+        ...(await this.groupExclusionWhere()),
       },
       data: { crm_funnel_id: funnelId, crm_stage_id: stageId },
     });
